@@ -6,6 +6,8 @@ import { readFile } from "fs/promises";
 import path from "path";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type Payload = {
   subject?: string;
@@ -55,7 +57,7 @@ function makeProblems({ grade, difficulty, count, ops }: GenOpts) {
         q = `${a} × ${b} = ____`;
         break;
       case "÷":
-        // make clean division
+        // clean division
         ans = rngInt(1, Math.max(2, Math.floor(maxN / 2)));
         b = rngInt(2, Math.max(2, Math.floor(maxN / ans)));
         a = ans * b;
@@ -104,12 +106,12 @@ function drawFooter(opts: {
   const margin = 50;
   const y = 40;
 
-  // thin divider line
+  // divider line
   page.drawLine({
     start: { x: margin, y: y + 14 },
     end: { x: width - margin, y: y + 14 },
     thickness: 0.5,
-    color: rgb(0.82, 0.85, 0.9), // light gray
+    color: rgb(0.82, 0.85, 0.9),
   });
 
   // left: slogan
@@ -152,7 +154,7 @@ export async function POST(req: NextRequest) {
     }
 
     const subject = (body.subject || "Math").toString().slice(0, 40);
-    const grade = clamp(Number(body.grade ?? 3), 1, 12);
+    const grade = clamp(Number.isFinite(body.grade as number ? (body.grade as number) : 3) ? (body.grade as number) : 3, 1, 12);
     const difficulty = (body.difficulty || "Easy").toString().slice(0, 20);
     const language = (body.language || "en").toString().slice(0, 10);
     const count = clamp(parseInt(String(body.count ?? 20), 10), 5, 100);
@@ -166,14 +168,13 @@ export async function POST(req: NextRequest) {
     const pdfDoc = await PDFDocument.create();
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
 
-    // Attempt to embed logo (optional)
+    // Optional logo
     const logo = await loadLogoBytes();
     let logoImage: any | undefined;
     if (logo) {
-      logoImage =
-        logo.ext === "png"
-          ? await pdfDoc.embedPng(logo.bytes)
-          : await pdfDoc.embedJpg(logo.bytes);
+      logoImage = logo.ext === "png"
+        ? await pdfDoc.embedPng(logo.bytes)
+        : await pdfDoc.embedJpg(logo.bytes);
     }
 
     // constants
@@ -182,7 +183,6 @@ export async function POST(req: NextRequest) {
 
     // --- PAGE 1: Questions ---
     const page1 = pdfDoc.addPage(letter);
-    // Header bar area
     if (logoImage) {
       const maxLogoW = 120;
       const logoW = Math.min(maxLogoW, logoImage.width);
@@ -190,9 +190,8 @@ export async function POST(req: NextRequest) {
       const logoH = logoImage.height * scale;
       const logoX = margin;
       const logoY = 792 - margin - logoH;
-      page1.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
 
-      // Title to the right of logo
+      page1.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
       page1.drawText(`KIDOOZA Worksheet — ${subject}`, {
         x: logoX + logoW + 16,
         y: logoY + (logoH - 20) / 2,
@@ -200,13 +199,11 @@ export async function POST(req: NextRequest) {
         font,
         color: rgb(0.2, 0.2, 0.8),
       });
-      // Meta line under the title
       page1.drawText(
         `Grade: ${grade}  |  Difficulty: ${difficulty}  |  Language: ${language}  |  Problems: ${count}`,
         { x: logoX + logoW + 16, y: logoY - 14, size: 11, font }
       );
     } else {
-      // Fallback title if no logo found
       page1.drawText(`KIDOOZA Worksheet — ${subject}`, {
         x: margin,
         y: 740,
@@ -220,22 +217,21 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Questions in two columns
+    // Questions (two columns)
     const leftX = margin;
     const rightX = 320;
-    let y = logoImage ? 680 : 680; // consistent spacing below header
+    let y = 680;
     const step = 24;
     const mid = Math.ceil(problems.length / 2);
     problems.forEach((p, i) => {
       const x = i < mid ? leftX : rightX;
-      if (i === mid) y = 680; // reset for second column
+      if (i === mid) y = 680; // reset for right column
       page1.drawText(`${i + 1}. ${p.q}`, { x, y, size: 12, font });
       y -= step;
     });
 
     // --- PAGE 2: Answer Key ---
     const page2 = pdfDoc.addPage(letter);
-
     if (logoImage) {
       const maxLogoW = 110;
       const logoW = Math.min(maxLogoW, logoImage.width);
@@ -243,8 +239,8 @@ export async function POST(req: NextRequest) {
       const logoH = logoImage.height * scale;
       const logoX = margin;
       const logoY = 792 - margin - logoH;
-      page2.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
 
+      page2.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
       page2.drawText(`Answer Key — ${subject}`, {
         x: logoX + logoW + 16,
         y: logoY + (logoH - 18) / 2,
@@ -262,7 +258,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // answers two columns
+    // answers (two columns)
     y = 700;
     problems.forEach((p, i) => {
       const x = i % 2 === 0 ? leftX : rightX;
@@ -280,10 +276,9 @@ export async function POST(req: NextRequest) {
     const bytes = await pdfDoc.save();
     const buffer = Buffer.from(bytes);
 
-    const safe = (s: string) => s.toLowerCase().replace(/\s+/g, "-");
-    const filename = `kidooza_${safe(subject)}_g${grade}_${safe(
-      difficulty
-    )}_${language}.pdf`;
+    const safe = (s: string) =>
+      s.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-_]/g, "");
+    const filename = `kidooza_${safe(subject)}_g${grade}_${safe(difficulty)}_${language}.pdf`;
 
     return new Response(buffer, {
       status: 200,
@@ -292,6 +287,8 @@ export async function POST(req: NextRequest) {
         "Content-Disposition": `inline; filename="${filename}"`,
         "Cache-Control": "no-store",
         "Content-Length": String(buffer.length),
+        // CORS-friendly (matches OPTIONS handler below)
+        "Access-Control-Allow-Origin": "*",
       },
     });
   } catch (err: unknown) {
