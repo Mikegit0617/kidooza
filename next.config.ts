@@ -1,8 +1,9 @@
-// next.config.ts
-const nextConfig = {
-  // ❌ DO NOT set: output: 'export'
-  // anything else here is fine
-}
+import type { NextConfig } from "next";
 
-export default nextConfig
+const nextConfig: NextConfig = {
+  reactStrictMode: true,
+  // IMPORTANT: Do not use `output: 'export'` (that disables API routes)
+  output: "standalone", // good for Vercel/Node deployment
+};
 
+export default nextConfig;
