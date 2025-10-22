@@ -1,9 +1,8 @@
 // next.config.ts
-import type { NextConfig } from "next";
+const nextConfig = {
+  // ❌ DO NOT set: output: 'export'
+  // anything else here is fine
+}
 
-const nextConfig: NextConfig = {
-  reactStrictMode: true,
-  // ❌ Make sure there's NO 'output: "export"' line here
-};
+export default nextConfig
 
-export default nextConfig;

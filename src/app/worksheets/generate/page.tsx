@@ -16,10 +16,11 @@ export default function WorksheetGenerator() {
   const clamp = (n: number, min: number, max: number) =>
     Math.min(Math.max(n, min), max);
 
-  const toggleOp = (op: string) =>
+  const toggleOp = (op: string) => {
     setOps((prev) =>
       prev.includes(op) ? prev.filter((o) => o !== op) : [...prev, op]
     );
+  };
 
   async function generatePdf() {
     setLoading(true);
