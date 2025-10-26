@@ -1,27 +1,55 @@
 {
   "compilerOptions": {
-    "target": "ES2017",
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
+    /* Core settings */
+    "target": "esnext",
     "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
+    "moduleResolution": "node",
     "jsx": "preserve",
+    "strict": true,
+    "skipLibCheck": true,
+
+    /* Add DOM & modern JS features */
+    "lib": [
+      "esnext",
+      "dom"
+    ],
+
+    /* Path & types setup */
+    "baseUrl": ".",
+    "typeRoots": [
+      "./src/types",
+      "./node_modules/@types"
+    ],
+
+    /* Optional enhancements */
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,
+    "noEmit": true,
     "incremental": true,
+    "isolatedModules": true,
+
     "plugins": [
       {
         "name": "next"
       }
     ],
-    "paths": {
-      "@/*": ["./src/*"]
-    }
+
+    /* 👇 Add your SpeechRecognition types here */
+    "types": ["dom-speech-recognition"]
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+
+  /* Include all app source files */
+  "include": [
+    "src",
+    ".next/types/**/*.ts"
+  ],
+
+  /* Exclude build folders */
+  "exclude": [
+    "node_modules",
+    ".next",
+    "dist"
+  ]
 }

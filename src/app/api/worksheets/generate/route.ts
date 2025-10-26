@@ -1,310 +1,285 @@
-// src/app/api/worksheets/generate/route.ts
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import { NextRequest, NextResponse } from "next/server";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import { readFile } from "fs/promises";
-import path from "path";
+// src/app/api/worksheets/generate/route.ts (v3.9)
+// Feature: Separate downloadable Answer Key PDF.
+// Behavior:
+//  - If includeAnswerKey = false/undefined: returns the student PDF bytes (binary response) — backward compatible.
+//  - If includeAnswerKey = true: returns JSON with base64 strings for BOTH PDFs: { ok:true, worksheet:"...", answerKey:"..." }
+//    Front-end should decode each and open/download separately.
 
-// Make sure this runs on a Node.js runtime (not edge)
+import { NextResponse } from "next/server";
+import { PDFDocument, StandardFonts, rgb, type PDFPage } from "pdf-lib";
+import fs from "node:fs/promises";
+import path from "node:path";
+
 export const runtime = "nodejs";
-// Ensure this route is always computed on demand
-export const dynamic = "force-dynamic";
-export const revalidate = 0;
 
-type Payload = {
-  subject?: string;
-  grade?: number;
-  difficulty?: string;
-  language?: string;
+export type GenerateBody = {
+  subject: string;
+  grade: number;
+  difficulty?: "Easy" | "Medium" | "Hard";
   count?: number;
-  ops?: string[]; // ["+","-","×","÷"]
+  teacher?: string;
+  student?: string;
+  includeAnswerKey?: boolean;
 };
 
-const clamp = (n: number, min: number, max: number) =>
-  Math.min(Math.max(n, min), max);
-
-function rngInt(min: number, max: number) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+async function loadPublicImage(filename: string): Promise<Uint8Array> {
+  const p = path.join(process.cwd(), "public", "img", filename);
+  return fs.readFile(p);
 }
 
-type GenOpts = { grade: number; difficulty: string; count: number; ops: string[] };
+async function makeQrPng(text: string): Promise<Uint8Array> {
+  const QR = await import("qrcode");
+  const dataUrl = await QR.toDataURL(text, { margin: 0, scale: 4 });
+  const b64 = dataUrl.replace(/^data:image\/png;base64,/, "");
+  return Buffer.from(b64, "base64");
+}
 
-function makeProblems({ grade, difficulty, count, ops }: GenOpts) {
-  const base = Math.max(grade, 1);
-  const mult = difficulty === "Hard" ? 15 : difficulty === "Medium" ? 10 : 6;
-  const maxN = Math.max(6, base * mult);
-
-  const chosen = ops.length ? ops : ["+"];
-
-  const problems: { q: string; a: number }[] = [];
-  for (let i = 0; i < count; i++) {
-    const op = chosen[rngInt(0, chosen.length - 1)];
-    let a = rngInt(1, maxN);
-    let b = rngInt(1, maxN);
-    let q = "";
-    let ans = 0;
-
-    switch (op) {
-      case "+":
-        ans = a + b;
-        q = `${a} + ${b} = ____`;
-        break;
-      case "-":
-        if (b > a) [a, b] = [b, a];
-        ans = a - b;
-        q = `${a} - ${b} = ____`;
-        break;
-      case "×":
-        ans = a * b;
-        q = `${a} × ${b} = ____`;
-        break;
-      case "÷":
-        // clean division
-        ans = rngInt(1, Math.max(2, Math.floor(maxN / 2)));
-        b = rngInt(2, Math.max(2, Math.floor(maxN / ans)));
-        a = ans * b;
-        q = `${a} ÷ ${b} = ____`;
-        break;
-      default:
-        ans = a + b;
-        q = `${a} + ${b} = ____`;
+function demoProblems(subject: string, count: number) {
+  const problems: { q: string; a: string }[] = [];
+  for (let i = 1; i <= count; i++) {
+    if (subject.toLowerCase() === "math") {
+      const a = 10 + i;
+      const b = 5 + (i % 5);
+      problems.push({ q: `${a} + ${b} = ______`, a: String(a + b) });
+    } else if (subject.toLowerCase() === "reading") {
+      problems.push({ q: `Circle the noun in: "The quick fox jumps."`, a: "fox" });
+    } else {
+      problems.push({ q: `${subject} Q${i}: ____________`, a: "" });
     }
-    problems.push({ q, a: ans });
   }
   return problems;
 }
 
-// Try to load a PNG/JPG logo from public/
-async function loadLogoBytes(): Promise<{ bytes: Uint8Array; ext: "png" | "jpg" } | undefined> {
-  const candidates = [
-    "public/brand/kidooza-logo.png",
-    "public/img/kidooza-logo.png",
-    "public/logo.png",
-    "public/brand/kidooza-logo.jpg",
-    "public/img/kidooza-logo.jpg",
-    "public/logo.jpg",
-  ];
-  for (const rel of candidates) {
-    try {
-      const abs = path.join(process.cwd(), rel);
-      const bytes = new Uint8Array(await readFile(abs));
-      const ext = rel.endsWith(".png") ? "png" : rel.endsWith(".jpg") ? "jpg" : undefined;
-      if (ext) return { bytes, ext };
-    } catch {
-      // ignore and try next
-    }
-  }
-  return undefined;
-}
+// ---------- Shared drawing primitives ----------
+const PAGE_SIZE: [number, number] = [612, 792];
+const BORDER = 24;
+const BAND = 54;
 
-function drawFooter(opts: {
-  page: any;
-  pageNumber: number;
-  totalPages: number;
-  font: any;
-}) {
-  const { page, pageNumber, totalPages, font } = opts;
-  const width = page.getWidth();
-  const margin = 50;
-  const y = 40;
+async function buildStudentPdf(opts: {
+  subject: string;
+  grade: number;
+  difficulty: string;
+  teacher: string;
+  student: string;
+  worksheetId: string;
+  problems: { q: string; a: string }[];
+  logoPng?: Uint8Array | null;
+}): Promise<Uint8Array> {
+  const { subject, grade, difficulty, teacher, student, worksheetId, problems, logoPng } = opts;
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const qrImg = await pdf.embedPng(await makeQrPng(`kidooza://worksheet/${worksheetId}`));
+  const logo = logoPng ? await pdf.embedPng(logoPng) : null;
 
-  page.drawLine({
-    start: { x: margin, y: y + 14 },
-    end: { x: width - margin, y: y + 14 },
-    thickness: 0.5,
-    color: rgb(0.82, 0.85, 0.9),
-  });
+  const leftXBase = BORDER + 24;
+  const rowH = 40;
+  const minBottomSpace = BORDER + 120;
 
-  page.drawText("Smarter Learning Powered by AI", {
-    x: margin,
-    y,
-    size: 10,
-    font,
-    color: rgb(0.25, 0.28, 0.35),
-  });
-
-  const site = "kidooza.ai";
-  const siteWidth = font.widthOfTextAtSize(site, 10);
-  page.drawText(site, {
-    x: (width - siteWidth) / 2,
-    y,
-    size: 10,
-    font,
-    color: rgb(0.25, 0.28, 0.35),
-  });
-
-  const ptxt = `Page ${pageNumber} of ${totalPages}`;
-  const pw = font.widthOfTextAtSize(ptxt, 10);
-  page.drawText(ptxt, {
-    x: width - margin - pw,
-    y,
-    size: 10,
-    font,
-    color: rgb(0.25, 0.28, 0.35),
-  });
-}
-
-export async function POST(req: NextRequest) {
-  try {
-    let body: Payload = {};
-    if (req.headers.get("content-type")?.includes("application/json")) {
-      body = await req.json().catch(() => ({} as Payload));
-    }
-
-    const subject = (body.subject || "Math").toString().slice(0, 40);
-    const grade = clamp(Number(body.grade ?? 3), 1, 12);
-    const difficulty = (body.difficulty || "Easy").toString().slice(0, 20);
-    const language = (body.language || "en").toString().slice(0, 10);
-    const count = clamp(parseInt(String(body.count ?? 20), 10), 5, 100);
-    const ops = Array.isArray(body.ops)
-      ? body.ops.filter((o) => ["+", "-", "×", "÷"].includes(o)).slice(0, 4)
-      : ["+"];
-
-    const problems = makeProblems({ grade, difficulty, count, ops });
-
-    const pdfDoc = await PDFDocument.create();
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-
-    const logo = await loadLogoBytes();
-    let logoImage: any | undefined;
+  function chrome(page: PDFPage) {
+    const { width, height } = page.getSize();
+    // header band
+    page.drawRectangle({ x: BORDER, y: height - BORDER - BAND, width: width - BORDER * 2, height: BAND, color: rgb(0.95, 0.97, 1.0) });
+    // border
+    page.drawRectangle({ x: BORDER, y: BORDER, width: width - BORDER * 2, height: height - BORDER * 2, borderColor: rgb(0.78, 0.82, 0.9), borderWidth: 1 });
+    // logo
     if (logo) {
-      logoImage = logo.ext === "png"
-        ? await pdfDoc.embedPng(logo.bytes)
-        : await pdfDoc.embedJpg(logo.bytes);
+      const logoH = 36; const logoW = (logo.width / logo.height) * logoH;
+      const logoX = BORDER + 12; const logoY = height - BORDER - (BAND + logoH) / 2 + 6;
+      page.drawImage(logo, { x: logoX, y: logoY, width: logoW, height: logoH });
     }
+    const titleLeft = BORDER + 12 + 44; const titleTop = height - BORDER - 18;
+    page.drawText("KIDOOZA Worksheet", { x: titleLeft, y: titleTop, size: 18, font: fontBold, color: rgb(0.15, 0.2, 0.35) });
+    page.drawText(`${subject}  •  Grade ${grade}  •  ${difficulty}`, { x: titleLeft, y: titleTop - 18, size: 12, font, color: rgb(0.25, 0.3, 0.45) });
 
-    const letter: [number, number] = [612, 792];
-    const margin = 50;
+    // teacher/student
+    const rightColX = page.getWidth() - BORDER - 250; const lineY1 = titleTop; const lineGap = 18;
+    page.drawText("Teacher:", { x: rightColX, y: lineY1, size: 10, font: fontBold, color: rgb(0.2,0.25,0.35) });
+    page.drawText(teacher || "", { x: rightColX + 60, y: lineY1, size: 11, font });
+    page.drawText("Student:", { x: rightColX, y: lineY1 - lineGap, size: 10, font: fontBold, color: rgb(0.2,0.25,0.35) });
+    page.drawText(student || "", { x: rightColX + 60, y: lineY1 - lineGap, size: 11, font });
 
-    // PAGE 1 — Questions
-    const page1 = pdfDoc.addPage(letter);
-    if (logoImage) {
-      const maxLogoW = 120;
-      const logoW = Math.min(maxLogoW, logoImage.width);
-      const scale = logoW / logoImage.width;
-      const logoH = logoImage.height * scale;
-      const logoX = margin;
-      const logoY = 792 - margin - logoH;
-      page1.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
+    // footer + QR
+    const footerY = BORDER + 16; const qrSize = 72; const qrX = page.getWidth() - BORDER - qrSize - 12; const qrY = BORDER + 8;
+    page.drawText("Smarter Learning Powered by AI — kidooza.ai", { x: BORDER + 12, y: footerY, size: 9, font, color: rgb(0.35,0.4,0.5) });
+    page.drawText(`ID: ${worksheetId}`, { x: qrX - 6, y: qrY + qrSize + 6, size: 10, font: fontBold, color: rgb(0.2,0.25,0.35) });
+    page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
+  }
 
-      page1.drawText(`KIDOOZA Worksheet — ${subject}`, {
-        x: logoX + logoW + 16,
-        y: logoY + (logoH - 20) / 2,
-        size: 20,
-        font,
-        color: rgb(0.2, 0.2, 0.8),
-      });
-      page1.drawText(
-        `Grade: ${grade}  |  Difficulty: ${difficulty}  |  Language: ${language}  |  Problems: ${count}`,
-        { x: logoX + logoW + 16, y: logoY - 14, size: 11, font }
-      );
-    } else {
-      page1.drawText(`KIDOOZA Worksheet — ${subject}`, {
-        x: margin,
-        y: 740,
-        size: 20,
-        font,
-        color: rgb(0.2, 0.2, 0.8),
-      });
-      page1.drawText(
-        `Grade: ${grade}  |  Difficulty: ${difficulty}  |  Language: ${language}  |  Problems: ${count}`,
-        { x: margin, y: 710, size: 12, font }
-      );
-    }
+  const startPage = () => { const p = pdf.addPage(PAGE_SIZE); chrome(p); const topY = p.getSize().height - BORDER - BAND - 24; return { page: p, cursorY: topY }; };
+  let { page, cursorY } = startPage();
 
-    // Two-column questions
-    const leftX = margin;
-    const rightX = 320;
-    let y = 680;
-    const step = 24;
-    const mid = Math.ceil(problems.length / 2);
-    problems.forEach((p, i) => {
-      const x = i < mid ? leftX : rightX;
-      if (i === mid) y = 680;
-      page1.drawText(`${i + 1}. ${p.q}`, { x, y, size: 12, font });
-      y -= step;
-    });
+  // Name/Date row (first page only)
+  page.drawText("Name:", { x: leftXBase, y: cursorY, size: 11, font: fontBold, color: rgb(0.2,0.25,0.35) });
+  page.drawLine({ start: { x: leftXBase + 40, y: cursorY - 2 }, end: { x: leftXBase + 260, y: cursorY - 2 }, thickness: 0.6, color: rgb(0.7,0.75,0.85) });
+  page.drawText("Date:", { x: leftXBase + 300, y: cursorY, size: 11, font: fontBold, color: rgb(0.2,0.25,0.35) });
+  page.drawLine({ start: { x: leftXBase + 340, y: cursorY - 2 }, end: { x: leftXBase + 480, y: cursorY - 2 }, thickness: 0.6, color: rgb(0.7,0.75,0.85) });
+  cursorY -= 24;
 
-    // PAGE 2 — Answer Key
-    const page2 = pdfDoc.addPage(letter);
-    if (logoImage) {
-      const maxLogoW = 110;
-      const logoW = Math.min(maxLogoW, logoImage.width);
-      const scale = logoW / logoImage.width;
-      const logoH = logoImage.height * scale;
-      const logoX = margin;
-      const logoY = 792 - margin - logoH;
-      page2.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
+  const numberCircle = (n: number, x: number, y: number) => {
+    page.drawCircle({ x, y, size: 10, borderColor: rgb(0.65,0.7,0.8), borderWidth: 0.8 });
+    const w = font.widthOfTextAtSize(String(n), 10);
+    page.drawText(String(n), { x: x - w / 2, y: y - 3, size: 10, font, color: rgb(0.2,0.25,0.35) });
+  };
+  const lineForAnswer = (x1: number, x2: number, y: number) =>
+    page.drawLine({ start: { x: x1, y }, end: { x: x2, y }, thickness: 0.6, color: rgb(0.7,0.75,0.85) });
 
-      page2.drawText(`Answer Key — ${subject}`, {
-        x: logoX + logoW + 16,
-        y: logoY + (logoH - 18) / 2,
-        size: 18,
-        font,
-        color: rgb(0.1, 0.5, 0.2),
-      });
-    } else {
-      page2.drawText(`Answer Key — ${subject}`, {
-        x: margin,
-        y: 740,
-        size: 18,
-        font,
-        color: rgb(0.1, 0.5, 0.2),
-      });
-    }
+  for (const [idx, it] of problems.entries()) {
+    if (cursorY < minBottomSpace) { ({ page, cursorY } = startPage()); }
+    numberCircle(idx + 1, leftXBase + 6, cursorY - 10);
+    page.drawText(it.q, { x: leftXBase + 24, y: cursorY - 16, size: 12, font, color: rgb(0,0,0) });
+    lineForAnswer(leftXBase + 24, page.getWidth() - BORDER - 24, cursorY - 24);
+    cursorY -= rowH;
+  }
 
-    y = 700;
-    problems.forEach((p, i) => {
-      const x = i % 2 === 0 ? leftX : rightX;
-      if (i % 2 === 0 && i > 0) y -= step;
-      page2.drawText(`${i + 1}. ${p.a}`, { x, y, size: 12, font });
-    });
+  return pdf.save();
+}
 
-    // Footer on all pages
-    const pages = pdfDoc.getPages();
-    pages.forEach((p, idx) =>
-      drawFooter({ page: p, pageNumber: idx + 1, totalPages: pages.length, font })
-    );
+async function buildAnswerKeyPdf(opts: {
+  subject: string;
+  grade: number;
+  difficulty: string;
+  teacher: string;
+  student: string;
+  worksheetId: string;
+  problems: { q: string; a: string }[];
+  logoPng?: Uint8Array | null;
+}): Promise<Uint8Array> {
+  const { subject, grade, difficulty, teacher, student, worksheetId, problems, logoPng } = opts;
+  const pdf = await PDFDocument.create();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const fontBold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const qrImg = await pdf.embedPng(await makeQrPng(`kidooza://worksheet/${worksheetId}`));
+  const logo = logoPng ? await pdf.embedPng(logoPng) : null;
 
-    const bytes = await pdfDoc.save();
-    const buffer = Buffer.from(bytes);
+  const leftXBase = BORDER + 24;
+  const rowH = 50; // taller to fit question + answer lines
+  const minBottomSpace = BORDER + 120;
 
-    const safe = (s: string) => s.toLowerCase().replace(/\s+/g, "-");
-    const filename = `kidooza_${safe(subject)}_g${grade}_${safe(difficulty)}_${language}.pdf`;
+  function chrome(page: PDFPage) {
+    const { width, height } = page.getSize();
+    page.drawRectangle({ x: BORDER, y: height - BORDER - BAND, width: width - BORDER * 2, height: BAND, color: rgb(1.0, 0.98, 0.9) });
+    page.drawRectangle({ x: BORDER, y: BORDER, width: width - BORDER * 2, height: height - BORDER * 2, borderColor: rgb(0.78, 0.82, 0.9), borderWidth: 1 });
+    if (logo) { const logoH = 36; const logoW = (logo.width / logo.height) * logoH; const logoX = BORDER + 12; const logoY = height - BORDER - (BAND + logoH) / 2 + 6; page.drawImage(logo, { x: logoX, y: logoY, width: logoW, height: logoH }); }
+    const titleLeft = BORDER + 12 + 44; const titleTop = height - BORDER - 18;
+    page.drawText("KIDOOZA Worksheet — Answer Key", { x: titleLeft, y: titleTop, size: 18, font: fontBold, color: rgb(0.15,0.2,0.35) });
+    page.drawText(`${subject}  •  Grade ${grade}  •  ${difficulty}`, { x: titleLeft, y: titleTop - 18, size: 12, font, color: rgb(0.25,0.3,0.45) });
+    const rightColX = page.getWidth() - BORDER - 250; const lineY1 = titleTop; const lineGap = 18;
+    page.drawText("Teacher:", { x: rightColX, y: lineY1, size: 10, font: fontBold });
+    page.drawText(teacher || "", { x: rightColX + 60, y: lineY1, size: 11, font });
+    page.drawText("Student:", { x: rightColX, y: lineY1 - lineGap, size: 10, font: fontBold });
+    page.drawText(student || "", { x: rightColX + 60, y: lineY1 - lineGap, size: 11, font });
+    const footerY = BORDER + 16; const qrSize = 72; const qrX = page.getWidth() - BORDER - qrSize - 12; const qrY = BORDER + 8;
+    page.drawText("Smarter Learning Powered by AI — kidooza.ai", { x: BORDER + 12, y: footerY, size: 9, font, color: rgb(0.35,0.4,0.5) });
+    page.drawText(`ID: ${worksheetId}`, { x: qrX - 6, y: qrY + qrSize + 6, size: 10, font: fontBold, color: rgb(0.2,0.25,0.35) });
+    page.drawImage(qrImg, { x: qrX, y: qrY, width: qrSize, height: qrSize });
+  }
 
-    return new Response(buffer, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${filename}"`,
-        "Cache-Control": "no-store",
-        "Content-Length": String(buffer.length),
-      },
-    });
-  } catch (err: unknown) {
-    const message =
-      err instanceof Error ? err.message : "Unexpected PDF generation error";
-    return NextResponse.json({ ok: false, message }, { status: 500 });
+  const startPage = () => { const p = pdf.addPage(PAGE_SIZE); chrome(p); const topY = p.getSize().height - BORDER - BAND - 24; return { page: p, cursorY: topY }; };
+  let { page, cursorY } = startPage();
+
+  page.drawText("Teacher’s Copy — Answers", { x: leftXBase, y: cursorY, size: 14, font: fontBold, color: rgb(0.4,0.3,0.1) });
+  cursorY -= 22;
+
+  const numberCircle = (n: number, x: number, y: number) => {
+    page.drawCircle({ x, y, size: 10, borderColor: rgb(0.65,0.7,0.8), borderWidth: 0.8 });
+    const w = font.widthOfTextAtSize(String(n), 10);
+    page.drawText(String(n), { x: x - w / 2, y: y - 3, size: 10, font });
+  };
+
+  for (const [idx, it] of problems.entries()) {
+    if (cursorY < minBottomSpace) { ({ page, cursorY } = startPage()); }
+    numberCircle(idx + 1, leftXBase + 6, cursorY - 10);
+    page.drawText(it.q, { x: leftXBase + 24, y: cursorY - 14, size: 12, font, color: rgb(0,0,0) });
+    const answer = it.a ? `Answer: ${it.a}` : "(open-ended)";
+    page.drawText(answer, { x: leftXBase + 32, y: cursorY - 30, size: 11, font: fontBold, color: rgb(0.1,0.4,0.1) });
+    cursorY -= rowH;
+  }
+
+  return pdf.save();
+}
+
+export async function POST(req: Request) {
+  try {
+    const body = (await req.json()) as GenerateBody;
+    const subject = body.subject || "Math";
+    const grade = body.grade ?? 3;
+    const difficulty = body.difficulty ?? "Easy";
+    const count = Math.max(1, Math.min(120, body.count ?? 10));
+    const teacher = body.teacher?.trim() || "";
+    const student = body.student?.trim() || "";
+    const includeAnswerKey = body.includeAnswerKey ?? false;
+
+    const worksheetId = `${subject.slice(0, 2).toUpperCase()}-${Date.now().toString(36).slice(-5)}`;
+    const problems = demoProblems(subject, count);
+    // --- JSON mode: return items for the Voice Quiz instead of the PDF ---
+{
+  const url = new URL(req.url);
+  const wantsJson =
+    url.searchParams.get("mode") === "json" ||
+    (req.headers.get("accept") || "").includes("application/json");
+
+  if (wantsJson) {
+    const items = problems.map((p: any, i: number) => ({
+      id: String(p.id ?? i + 1),
+      question:
+        p.prompt ??
+        p.question ??
+        (p.lhs !== undefined && p.rhs !== undefined
+          ? `${p.lhs} ${p.op ?? "+"} ${p.rhs} = ____`
+          : `Question ${i + 1}`),
+      answer:
+        p.answer ??
+        p.solution ??
+        p.result ??
+        p.value ??
+        p.correct ??
+        null,
+    }));
+
+    return NextResponse.json({ items });
   }
 }
 
-// Friendly guard for accidental GETs
-export function GET() {
-  return NextResponse.json(
-    { ok: false, message: "Use POST /api/worksheets/generate" },
-    { status: 405 }
-  );
+
+    let logoPng: Uint8Array | null = null;
+    try { logoPng = await loadPublicImage("logo.png"); } catch { logoPng = null; }
+
+    // Build the student PDF first
+    const studentBytes = await buildStudentPdf({ subject, grade, difficulty, teacher, student, worksheetId, problems, logoPng });
+
+    if (!includeAnswerKey) {
+      // Backward-compatible binary return
+      return new NextResponse(Buffer.from(studentBytes), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `inline; filename="${subject.toLowerCase()}-worksheet.pdf"`,
+          "X-Kidooza-WorksheetId": worksheetId,
+        },
+      });
+    }
+
+    // Build a separate Answer Key PDF
+    const keyBytes = await buildAnswerKeyPdf({ subject, grade, difficulty, teacher, student, worksheetId, problems, logoPng });
+
+    // Return JSON with base64 strings for both PDFs
+    const worksheetB64 = Buffer.from(studentBytes).toString("base64");
+    const answerKeyB64 = Buffer.from(keyBytes).toString("base64");
+
+    return NextResponse.json({ ok: true, worksheet: worksheetB64, answerKey: answerKeyB64, id: worksheetId });
+  } catch (err: any) {
+    console.error("/api/worksheets/generate error", err);
+    return NextResponse.json({ ok: false, message: String(err?.message || err) }, { status: 500 });
+  }
 }
 
-// Allow CORS preflight if you ever call from another origin
-export function OPTIONS() {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    },
+// Delegate GET → POST and preserve the original URL (keeps ?mode=json)
+export async function GET(req: Request) {
+  const newReq = new Request(req.url, {
+    method: "POST",
+    headers: req.headers,
   });
+  return POST(newReq);
 }
 
