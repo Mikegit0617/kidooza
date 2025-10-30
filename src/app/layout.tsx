@@ -4,7 +4,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "KIDOOZA",
-  description: "Smarter Learning Powered by AI",
+  description: "KIDOOZA learning games",
 };
 
 export default function RootLayout({
@@ -14,7 +14,10 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body className="bg-gray-50 text-gray-900 antialiased">
+        {children}
+      </body>
     </html>
   );
 }
+

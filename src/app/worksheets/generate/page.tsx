@@ -1,378 +1,374 @@
-"use client";
-/// <reference types="dom-speech-recognition" />
+'use client';
 
-import React, { useEffect, useRef, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-/**
- * KIDOOZA — Voice Quiz (Loop Until Correct) + Live Worksheet Data
- * - Reads question → auto-listens until a final result
- * - Wrong → “Try again.” then resumes listening
- * - Right → “Correct!” and stops (Next to continue)
- * - Loads items from /api/worksheets/generate?mode=json
- *   (falls back to POST JSON if GET returns PDF or non-JSON)
- */
-
-type RawItem = any;
-type QA = { id?: string | number; q: string; a: string | number };
-
-/* ---------- Normalize various item shapes into { q, a } ---------- */
-function toQA(x: RawItem): QA | null {
-  if (!x) return null;
-  const q = x.question ?? x.q ?? x.prompt ?? x.text ?? x.title ?? null;
-  const a = x.answer ?? x.a ?? x.solution ?? x.expected ?? x.result ?? null;
-  if (q == null || a == null) return null;
-  return { id: x.id ?? x._id ?? undefined, q: String(q), a };
+function base64ToBlobUrl(b64: string, mime = 'application/pdf') {
+  const byteChars = typeof atob !== 'undefined' ? atob(b64) : Buffer.from(b64, 'base64').toString('binary');
+  const len = byteChars.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = byteChars.charCodeAt(i);
+  const blob = new Blob([bytes], { type: mime });
+  return URL.createObjectURL(blob);
 }
 
-/* ---------- Demo fallback if API is unavailable ---------- */
-const DEMO: QA[] = [
-  { q: "What is two plus three?", a: 5 },
-  { q: "Spell the word 'cat'.", a: "cat" },
-  { q: "What planet do we live on?", a: "earth" },
-];
+type Lang = 'en' | 'es' | 'vi';
+type Diff = 'Easy' | 'Medium' | 'Hard';
 
-/* ---------- TTS helper ---------- */
-function speak(
-  text: string,
-  opts?: Partial<SpeechSynthesisUtterance>,
-  onend?: () => void
-) {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
-    onend?.();
-    return;
-  }
-  window.speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "en-US";
-  if (opts) Object.assign(u, opts);
-  if (onend) u.onend = onend;
-  window.speechSynthesis.speak(u);
+const STORAGE_KEY = 'kidooza.generate.settings';
+
+function detectLang(): Lang {
+  if (typeof navigator === 'undefined') return 'en';
+  const l = (navigator.language || navigator.languages?.[0] || 'en').toLowerCase();
+  if (l.startsWith('es')) return 'es';
+  if (l.startsWith('vi')) return 'vi';
+  return 'en';
 }
 
-/* ---------- Grading helpers ---------- */
-function norm(x: unknown) {
-  return String(x ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[.,!?]/g, "")
-    .replace(/[^\w$-]+/g, " ")
-    .replace(/\s+/g, " ");
+function clamp(n: number, min: number, max: number) {
+  if (Number.isNaN(n)) return min;
+  return Math.max(min, Math.min(max, Math.floor(n)));
 }
 
-function parseNumberLike(s: string): number | null {
-  const m = s.replace(/[^0-9.-]/g, "");
-  if (!m || m === "-" || m === "." || m === "-.") return null;
-  const n = Number(m);
-  return Number.isFinite(n) ? n : null;
-}
+export default function GenerateWorksheetPage() {
+  // ----- core fields
+  const [subject, setSubject] = useState('Math');
+  const [grade, setGrade] = useState<number>(3);
+  const [difficulty, setDifficulty] = useState<Diff>('Easy');
+  const [count, setCount] = useState<number>(10);
+  const [teacher, setTeacher] = useState('');
+  const [student, setStudent] = useState('');
+  const [language, setLanguage] = useState<Lang>('en');
 
-const WORD2NUM: Record<string, number> = {
-  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5,
-  six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
-};
+  // work lines
+  const [showWorkLines, setShowWorkLines] = useState(true);
+  const [linesPerQuestion, setLinesPerQuestion] = useState<number>(2);
 
-function maybeWordNumber(s: string): number | null {
-  const n = WORD2NUM[s.trim().toLowerCase()];
-  return typeof n === "number" ? n : null;
-}
+  // loading
+  const [loadingStudent, setLoadingStudent] = useState(false);
+  const [loadingKey, setLoadingKey] = useState(false);
 
-function isCorrect(transcriptRaw: string, expectedRaw: string | number): boolean {
-  const t = norm(transcriptRaw);
-  const e = norm(expectedRaw);
+  // answer key url (not rendered, used to revoke)
+  const keyUrlRef = useRef<string | null>(null);
+  useEffect(() => () => { if (keyUrlRef.current) URL.revokeObjectURL(keyUrlRef.current); }, []);
 
-  if (t === e) return true;
-  if (t === e.replace(/^\$/, "")) return true;
-  if (("$" + t) === e) return true;
-
-  const tn = parseNumberLike(t);
-  const en = parseNumberLike(e);
-  if (tn !== null && en !== null && tn === en) return true;
-
-  const tw = maybeWordNumber(t);
-  if (tw !== null && en !== null && tw === en) return true;
-
-  return false;
-}
-
-/* ========================= PAGE ========================= */
-export default function Page() {
-  const [items, setItems] = useState<QA[]>(DEMO);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const [index, setIndex] = useState(0);
-  const [heard, setHeard] = useState("");
-  const [listening, setListening] = useState(false);
-  const [score, setScore] = useState(0);
-
-  const recognitionRef = useRef<any>(null);
-  const forceStopRef = useRef<boolean>(false);
-  const waitingToResumeAfterFeedbackRef = useRef<boolean>(false);
-
-  /* ---------- Load worksheet from API ---------- */
-  const loadWorksheet = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
+  // ----- load from localStorage on first mount
+  useEffect(() => {
     try {
-      // Try GET JSON first
-      let res = await fetch("/api/worksheets/generate?mode=json", {
-        method: "GET",
-        headers: { Accept: "application/json" },
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        setSubject(saved.subject ?? 'Math');
+        setGrade(clamp(saved.grade ?? 3, 1, 12));
+        setDifficulty((saved.difficulty as Diff) ?? 'Easy');
+        setCount(clamp(saved.count ?? 10, 1, 120));
+        setTeacher(saved.teacher ?? '');
+        setStudent(saved.student ?? '');
+        setLanguage((saved.language as Lang) ?? detectLang());
+        setShowWorkLines(typeof saved.showWorkLines === 'boolean' ? saved.showWorkLines : (String(saved.subject ?? '').toLowerCase() === 'math'));
+        setLinesPerQuestion(clamp(saved.linesPerQuestion ?? (String(saved.subject ?? '').toLowerCase() === 'math' ? 2 : 0), 0, 5));
+      } else {
+        // no saved prefs → choose smart defaults
+        setLanguage(detectLang());
+        if (subject.toLowerCase() === 'math') {
+          setShowWorkLines(true);
+          setLinesPerQuestion(2);
+        } else {
+          setShowWorkLines(false);
+        }
+      }
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // ----- smart subject defaults (do not override if user explicitly set)
+  useEffect(() => {
+    if (subject.toLowerCase() === 'math') {
+      setShowWorkLines((v) => v ?? true);
+      setLinesPerQuestion((v) => (v === 0 ? 2 : v));
+    } else {
+      setShowWorkLines(false);
+    }
+  }, [subject]);
+
+  // ----- persist to localStorage (debounced)
+  const saveTimeout = useRef<number | null>(null);
+  useEffect(() => {
+    if (saveTimeout.current) window.clearTimeout(saveTimeout.current);
+    saveTimeout.current = window.setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          subject, grade, difficulty, count, teacher, student,
+          language, showWorkLines, linesPerQuestion
+        }));
+      } catch { /* ignore */ }
+    }, 250);
+    return () => { if (saveTimeout.current) window.clearTimeout(saveTimeout.current); };
+  }, [subject, grade, difficulty, count, teacher, student, language, showWorkLines, linesPerQuestion]);
+
+  // ----- validation
+  const errors = useMemo(() => {
+    const e: Record<string, string> = {};
+    if (grade < 1 || grade > 12) e.grade = 'Grade must be between 1 and 12.';
+    if (count < 1 || count > 120) e.count = 'Count must be between 1 and 120.';
+    if (linesPerQuestion < 0 || linesPerQuestion > 5) e.lines = 'Lines per question must be 0–5.';
+    return e;
+  }, [grade, count, linesPerQuestion]);
+
+  const hasErrors = Object.keys(errors).length > 0;
+
+  // ----- actions
+  async function openStudentPdf() {
+    try {
+      setLoadingStudent(true);
+      const res = await fetch('/api/worksheets/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subject,
+          grade: clamp(grade, 1, 12),
+          difficulty,
+          count: clamp(count, 1, 120),
+          teacher,
+          student,
+          language,
+          showWorkLines,
+          linesPerQuestion: clamp(linesPerQuestion, 0, 5),
+        }),
       });
-
-      // If not OK or not JSON (e.g., PDF), try POST JSON fallback
-      if (
-        !res.ok ||
-        !res.headers.get("content-type")?.includes("application/json")
-      ) {
-        res = await fetch("/api/worksheets/generate?mode=json", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            accept: "application/json",
-          },
-          body: JSON.stringify({ limit: 10 }),
-        });
-      }
-
-      const data = await res.json();
-      const raw: RawItem[] = Array.isArray(data)
-        ? data
-        : Array.isArray((data as any)?.items)
-        ? (data as any).items
-        : [];
-
-      const normalized: QA[] = (raw.map(toQA).filter(Boolean) as QA[]) || [];
-
-      if (normalized.length === 0) {
-        setItems(DEMO);
-        setLoadError("No items returned from API — using demo set.");
-      } else {
-        setItems(normalized);
-      }
-
-      // reset quiz state
-      setIndex(0);
-      setScore(0);
-      setHeard("");
-    } catch {
-      setItems(DEMO);
-      setLoadError("Failed to load API — using demo set.");
+      if (!res.ok) throw new Error(`Server ${res.status}`);
+      const buf = await res.arrayBuffer();
+      const blob = new Blob([buf], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank');
+    } catch (e) {
+      console.error(e);
+      alert('Failed to generate worksheet PDF.');
     } finally {
-      setLoading(false);
+      setLoadingStudent(false);
     }
-  }, []);
-
-  useEffect(() => {
-    loadWorksheet();
-  }, [loadWorksheet]);
-
-  /* ---------- Init/refresh SpeechRecognition per question ---------- */
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const Ctor =
-      (window as any).webkitSpeechRecognition ||
-      (window as any).SpeechRecognition;
-
-    if (!Ctor) {
-      console.warn("SpeechRecognition not supported in this browser.");
-      return;
-    }
-
-    const recog: any = new Ctor();
-    // Keep the stream open; evaluate final results only
-    recog.continuous = true;
-    recog.interimResults = true;
-    recog.maxAlternatives = 1;
-    recog.lang = "en-US";
-
-    recog.onstart = () => setListening(true);
-
-    recog.onresult = (ev: any) => {
-      // Only act on final result
-      let finalText = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const r = ev.results[i];
-        if (r.isFinal) finalText = r[0].transcript;
-      }
-      if (!finalText) return;
-
-      setHeard(finalText.trim());
-      const expected = items[index]?.a;
-      const ok = isCorrect(finalText, expected);
-
-      // Pause recognition while we give audio feedback
-      try { recog.stop(); } catch {}
-      setListening(false);
-
-      if (ok) {
-        speak("Correct!", undefined, () => {
-          waitingToResumeAfterFeedbackRef.current = false;
-        });
-        setScore((s) => s + 1);
-      } else {
-        // Wrong → “Try again.” → resume listening automatically
-        waitingToResumeAfterFeedbackRef.current = true;
-        speak(`You said: ${finalText}. Try again.`, undefined, () => {
-          if (!forceStopRef.current && waitingToResumeAfterFeedbackRef.current) {
-            startListening(); // resume loop
-          }
-        });
-      }
-    };
-
-    recog.onnomatch = () => {
-      // no speech recognized; onend will decide whether to restart
-    };
-
-    recog.onerror = (e: any) => {
-      console.error("Speech recognition error:", e.error);
-      // let onend decide whether to resume
-    };
-
-    recog.onend = () => {
-      // If we didn’t force stop and we’re not waiting for feedback,
-      // auto-restart to keep waiting for an answer.
-      if (!forceStopRef.current && !waitingToResumeAfterFeedbackRef.current) {
-        setTimeout(() => {
-          try { recog.start(); } catch {}
-        }, 200);
-      } else {
-        setListening(false);
-      }
-    };
-
-    recognitionRef.current = recog;
-    return () => {
-      try { recog.abort(); } catch {}
-      recognitionRef.current = null;
-    };
-  }, [index, items]);
-
-  /* ---------- Mic permission ---------- */
-  const ensureMicAccess = useCallback(async () => {
-    try {
-      const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-      s.getTracks().forEach((t) => t.stop());
-      return true;
-    } catch {
-      alert("Please allow microphone access for this site.");
-      return false;
-    }
-  }, []);
-
-  /* ---------- Start/Resume listening ---------- */
-  const startListening = useCallback(async () => {
-    const recog: any = recognitionRef.current;
-    if (!recog) {
-      alert("SpeechRecognition is not supported in this browser.");
-      return;
-    }
-    if (!(await ensureMicAccess())) return;
-
-    setHeard("");
-    forceStopRef.current = false;
-    waitingToResumeAfterFeedbackRef.current = false;
-
-    speak("Listening");
-    try {
-      recog.start();
-    } catch (err) {
-      console.warn("start() issue:", err);
-    }
-  }, [ensureMicAccess]);
-
-  /* ---------- Read question → after TTS, auto-listen ---------- */
-  const readQuestion = useCallback(async () => {
-    if (!(await ensureMicAccess())) return;
-
-    const q = items[index]?.q ?? "";
-    speak(q, undefined, () => {
-      startListening();
-    });
-  }, [index, items, ensureMicAccess, startListening]);
-
-  /* ---------- Manual Answer (fallback) ---------- */
-  const manualAnswer = useCallback(() => {
-    startListening();
-  }, [startListening]);
-
-  /* ---------- Next question ---------- */
-  const nextQuestion = useCallback(() => {
-    window.speechSynthesis?.cancel();
-    recognitionRef.current?.abort?.();
-    forceStopRef.current = true;
-    waitingToResumeAfterFeedbackRef.current = false;
-
-    setHeard("");
-    setListening(false);
-    setIndex((i) => (i + 1) % items.length);
-  }, [items.length]);
-
-  /* ---------- Regenerate / Reload worksheet ---------- */
-  const reload = useCallback(() => {
-    window.speechSynthesis?.cancel();
-    recognitionRef.current?.abort?.();
-    forceStopRef.current = true;
-    waitingToResumeAfterFeedbackRef.current = false;
-    setHeard("");
-    setListening(false);
-    loadWorksheet();
-  }, [loadWorksheet]);
-
-  /* ---------- UI ---------- */
-  const qa = items[index];
-
-  if (loading) {
-    return (
-      <div className="min-h-screen p-6">
-        <h1 className="text-2xl font-bold">KIDOOZA — Voice Quiz</h1>
-        <div className="mt-4">Loading worksheet…</div>
-      </div>
-    );
   }
+
+  async function openAnswerKeyPdf() {
+    try {
+      setLoadingKey(true);
+      const res = await fetch('/api/worksheets/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          subject,
+          grade: clamp(grade, 1, 12),
+          difficulty,
+          count: clamp(count, 1, 120),
+          teacher,
+          student,
+          includeAnswerKey: true,
+          language,
+          showWorkLines,
+          linesPerQuestion: clamp(linesPerQuestion, 0, 5),
+        }),
+      });
+      if (!res.ok) throw new Error(`Server ${res.status}`);
+      const data = await res.json();
+      if (!data?.answerKey) throw new Error('Missing answerKey in response');
+
+      if (keyUrlRef.current) URL.revokeObjectURL(keyUrlRef.current);
+      const href = base64ToBlobUrl(data.answerKey);
+      keyUrlRef.current = href;
+      window.open(href, '_blank');
+    } catch (e) {
+      console.error(e);
+      alert('Failed to open Answer Key PDF.');
+    } finally {
+      setLoadingKey(false);
+    }
+  }
+
+  // ----- styles
+  const inputCls =
+    'border rounded-lg px-3 py-2 text-sm border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-200';
+  const labelCls = 'text-sm font-medium text-slate-700';
 
   return (
-    <div className="min-h-screen p-6 flex flex-col gap-4">
-      <h1 className="text-2xl font-bold">KIDOOZA — Voice Quiz</h1>
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100">
+      <div className="max-w-4xl mx-auto p-6">
+        {/* Header */}
+        <header className="mb-5">
+          <h1 className="text-3xl font-semibold text-slate-800 tracking-tight">Generate Worksheet</h1>
+          <p className="text-slate-600 mt-1">
+            Create a polished two-column student worksheet and an answer key. Add optional work lines, choose
+            language, and set difficulty.
+          </p>
+        </header>
 
-      {loadError && <div className="text-sm text-red-600">{loadError}</div>}
+        {/* Card */}
+        <section className="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-6">
+          {/* Grid form */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* Subject */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Subject</label>
+              <select className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)}>
+                <option>Math</option>
+                <option>Reading</option>
+                <option>Science</option>
+                <option>History</option>
+                <option>Geography</option>
+                <option>Animals</option>
+                <option>Art</option>
+                <option>Language</option>
+              </select>
+            </div>
 
-      <div className="flex items-center gap-3">
-        <button onClick={reload} className="px-3 py-2 rounded border" aria-label="Reload">
-          🔁 Regenerate Worksheet
-        </button>
-        <div className="text-sm opacity-70">
-          {items.length} question{items.length !== 1 ? "s" : ""} loaded
-        </div>
+            {/* Grade */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Grade</label>
+              <input
+                type="number"
+                className={inputCls}
+                value={grade}
+                onChange={(e) => setGrade(clamp(parseInt(e.target.value || '0', 10), 0, 99))}
+                min={1}
+                max={12}
+                aria-invalid={!!errors.grade}
+              />
+              {errors.grade && <p className="text-xs text-red-600">{errors.grade}</p>}
+            </div>
+
+            {/* Difficulty */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Difficulty</label>
+              <select className={inputCls} value={difficulty} onChange={(e) => setDifficulty(e.target.value as Diff)}>
+                <option>Easy</option>
+                <option>Medium</option>
+                <option>Hard</option>
+              </select>
+            </div>
+
+            {/* Count */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Count</label>
+              <input
+                type="number"
+                className={inputCls}
+                value={count}
+                onChange={(e) => setCount(clamp(parseInt(e.target.value || '0', 10), 0, 999))}
+                min={1}
+                max={120}
+                aria-invalid={!!errors.count}
+              />
+              {errors.count && <p className="text-xs text-red-600">{errors.count}</p>}
+            </div>
+
+            {/* Teacher */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Teacher</label>
+              <input
+                type="text"
+                className={inputCls}
+                value={teacher}
+                onChange={(e) => setTeacher(e.target.value)}
+              />
+            </div>
+
+            {/* Student */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Student</label>
+              <input
+                type="text"
+                className={inputCls}
+                value={student}
+                onChange={(e) => setStudent(e.target.value)}
+              />
+            </div>
+
+            {/* Language */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Language</label>
+              <select
+                className={inputCls}
+                value={language}
+                onChange={(e) => setLanguage(e.target.value as Lang)}
+              >
+                <option value="en">English</option>
+                <option value="es">Español</option>
+                <option value="vi">Tiếng Việt</option>
+              </select>
+            </div>
+
+            {/* Work lines toggle */}
+            <div className="flex flex-col gap-1.5">
+              <label className={labelCls}>Show work lines</label>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowWorkLines((v) => !v)}
+                  className={
+                    'relative inline-flex h-6 w-11 items-center rounded-full transition shadow-sm ' +
+                    (showWorkLines ? 'bg-blue-600' : 'bg-slate-300')
+                  }
+                  aria-pressed={showWorkLines}
+                >
+                  <span
+                    className={
+                      'inline-block h-5 w-5 transform rounded-full bg-white transition ' +
+                      (showWorkLines ? 'translate-x-5' : 'translate-x-1')
+                    }
+                  />
+                </button>
+                <span className="text-sm text-slate-600">
+                  {showWorkLines ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+            </div>
+
+            {/* Lines per question */}
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between">
+                <label className={labelCls}>Lines per question</label>
+                <span className="text-xs text-slate-500">0–5</span>
+              </div>
+              <input
+                type="number"
+                className={inputCls + (showWorkLines ? '' : ' opacity-60')}
+                value={linesPerQuestion}
+                onChange={(e) => setLinesPerQuestion(clamp(parseInt(e.target.value || '0', 10), 0, 5))}
+                min={0}
+                max={5}
+                disabled={!showWorkLines}
+                aria-invalid={!!errors.lines}
+              />
+              {errors.lines && <p className="text-xs text-red-600">{errors.lines}</p>}
+              <p className="text-xs text-slate-500">
+                Always includes a thin answer line; additional lines appear when enabled.
+              </p>
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="my-6 h-px bg-slate-200" />
+
+          {/* Actions */}
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={openStudentPdf}
+              disabled={loadingStudent || hasErrors}
+              className="px-4 py-2 rounded-xl bg-blue-600 text-white text-sm font-medium shadow hover:bg-blue-700 disabled:opacity-60"
+            >
+              {loadingStudent ? 'Generating…' : 'Generate PDF (Student)'}
+            </button>
+            <button
+              onClick={openAnswerKeyPdf}
+              disabled={loadingKey || hasErrors}
+              className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-sm font-medium shadow hover:bg-emerald-700 disabled:opacity-60"
+              title="Opens only the Answer Key PDF in a new tab"
+            >
+              {loadingKey ? 'Opening…' : 'Open Answer Key PDF'}
+            </button>
+          </div>
+        </section>
       </div>
-
-      <div className="text-lg">
-        <div className="font-semibold mb-2">Question:</div>
-        <div>{qa?.q ?? "—"}</div>
-      </div>
-
-      <div className="flex gap-3 items-center">
-        <button onClick={readQuestion} className="px-3 py-2 rounded border" aria-label="Read Question">
-          🔊 Read Question
-        </button>
-
-        <button onClick={manualAnswer} className="px-3 py-2 rounded border" aria-label="Answer">
-          {listening ? "🎙️ Listening…" : "🎤 Answer"}
-        </button>
-
-        <button onClick={nextQuestion} className="px-3 py-2 rounded border" aria-label="Next Question">
-          ➡️ Next
-        </button>
-      </div>
-
-      <div>
-        <div className="font-semibold">Heard:</div>
-        <div>{heard || "—"}</div>
-      </div>
-
-      <div className="mt-2">Score: {score} / {items.length || 1}</div>
     </div>
   );
 }
