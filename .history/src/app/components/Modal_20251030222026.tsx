@@ -7,10 +7,8 @@ interface ModalProps {
   onClose: () => void;
   title?: string;
   children: React.ReactNode;
-  size?: "sm" | "md" | "lg" | "xl"; // ✅ add "xl"
+  size?: "sm" | "md" | "lg"; // ✅ new optional size prop
 }
-
-
 
 /**
  * Simple reusable modal for KIDOOZA
@@ -36,11 +34,10 @@ export default function Modal({
   if (!show) return null;
 
   const sizeClasses = {
-  sm: "max-w-sm",
-  md: "max-w-md",
-  lg: "max-w-2xl",
-  xl: "max-w-4xl", // ✅ Tailwind-supported size
-};
+    sm: "max-w-sm",
+    md: "max-w-md",
+    lg: "max-w-2xl",
+  };
 
   return (
     <div

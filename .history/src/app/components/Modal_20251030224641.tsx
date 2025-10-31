@@ -35,12 +35,8 @@ export default function Modal({
 
   if (!show) return null;
 
-  const sizeClasses = {
-  sm: "max-w-sm",
-  md: "max-w-md",
-  lg: "max-w-2xl",
-  xl: "max-w-4xl", // ✅ Tailwind-supported size
-};
+  
+
 
   return (
     <div

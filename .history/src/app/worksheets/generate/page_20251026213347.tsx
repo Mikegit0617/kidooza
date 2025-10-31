@@ -191,7 +191,7 @@ export default function GenerateWorksheetPage() {
   const labelCls = 'text-sm font-medium text-slate-700';
 
   return (
-    <div className="min-h-screen bg-linear-to-b from-slate-50 to-slate-100">
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100">
       <div className="max-w-4xl mx-auto p-6">
         {/* Header */}
         <header className="mb-5">

@@ -42,6 +42,7 @@ export default function Modal({
   xl: "max-w-4xl", // ✅ Tailwind-supported size
 };
 
+
   return (
     <div
       className="fixed inset-0 z-9998 flex items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity"
