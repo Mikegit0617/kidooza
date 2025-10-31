@@ -1,8 +1,10 @@
 {
   "compilerOptions": {
-    "baseUrl": "src",              // 👈 SET this to 'src'
+    "baseUrl": "src", // 👈 SET this to 'src'
     "paths": {
-      "@/*": ["*"]                 // 👈 This allows '@/lib/xyz' style
+      "@/*": [
+        "*"
+      ] // 👈 This allows '@/lib/xyz' style
     },
     "typeRoots": [
       "./src/types",
@@ -25,6 +27,20 @@
       {
         "name": "next"
       }
+    ],
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
     ]
-  }
+  },
+  "include": [
+    "next-env.d.ts",
+    ".next/types/**/*.ts",
+    "**/*.ts",
+    "**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
 }
