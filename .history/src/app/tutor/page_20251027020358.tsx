@@ -168,12 +168,7 @@ export default function TutorPage(){
       </div>
 
       {showBankPanel && (
-       <Modal
-  show={showBankPanel} // ✅ ADD THIS
-  onClose={() => setShowBankPanel(false)}
-  size="xl"
->
- 
+        <Modal onClose={()=>setShowBankPanel(false)} size="xl">
           <StarBank bank={bank} badges={badges} mode="view" onClose={()=>setShowBankPanel(false)} />
         </Modal>
       )}

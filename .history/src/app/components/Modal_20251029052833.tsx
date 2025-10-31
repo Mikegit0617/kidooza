@@ -7,10 +7,7 @@ interface ModalProps {
   onClose: () => void;
   title?: string;
   children: React.ReactNode;
-  size?: "sm" | "md" | "lg" | "xl"; // ✅ add "xl"
 }
-
-
 
 /**
  * Simple reusable modal for KIDOOZA
@@ -18,13 +15,7 @@ interface ModalProps {
  * - Clicks outside the box also close
  * - Smooth fade animation
  */
-export default function Modal({
-  show,
-  onClose,
-  title,
-  children,
-  size = "md", // ✅ default to medium if not passed
-}: ModalProps) {
+export default function Modal({ show, onClose, title, children }: ModalProps) {
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -35,20 +26,13 @@ export default function Modal({
 
   if (!show) return null;
 
-  const sizeClasses = {
-  sm: "max-w-sm",
-  md: "max-w-md",
-  lg: "max-w-2xl",
-  xl: "max-w-4xl", // ✅ Tailwind-supported size
-};
-
   return (
     <div
       className="fixed inset-0 z-9998 flex items-center justify-center bg-black/50 backdrop-blur-sm transition-opacity"
       onClick={onClose}
     >
       <div
-        className={`bg-white rounded-2xl shadow-xl ${sizeClasses[size]} w-full p-6 m-4 text-center animate-fade-in`}
+        className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 m-4 text-center animate-fade-in"
         onClick={(e) => e.stopPropagation()}
       >
         {title && <h2 className="text-xl font-semibold mb-3">{title}</h2>}

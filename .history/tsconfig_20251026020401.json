@@ -1,0 +1,55 @@
+{
+  "compilerOptions": {
+    /* Core settings */
+    "target": "esnext",
+    "module": "esnext",
+    "moduleResolution": "node",
+    "jsx": "preserve",
+    "strict": true,
+    "skipLibCheck": true,
+
+    /* Add DOM & modern JS features */
+    "lib": [
+      "esnext",
+      "dom"
+    ],
+
+    /* Path & types setup */
+    "baseUrl": ".",
+    "typeRoots": [
+      "./src/types",
+      "./node_modules/@types"
+    ],
+
+    /* Optional enhancements */
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,
+    "noEmit": true,
+    "incremental": true,
+    "isolatedModules": true,
+
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+
+    /* 👇 Add your SpeechRecognition types here */
+    "types": ["dom-speech-recognition"]
+  },
+
+  /* Include all app source files */
+  "include": [
+    "src",
+    ".next/types/**/*.ts"
+  ],
+
+  /* Exclude build folders */
+  "exclude": [
+    "node_modules",
+    ".next",
+    "dist"
+  ]
+}
